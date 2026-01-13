@@ -12,6 +12,8 @@ public:
 	static void Deinitialize();
 
 public:
+	static void EnsureThreadAttached();
+
 	static MonoObject* Object_New(MonoClass* InMonoClass);
 
 	static MonoObject* Object_Init(MonoClass* InMonoClass, const int32 InParamCount = 0, void** InParams = nullptr);

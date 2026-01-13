@@ -14,6 +14,7 @@
 #include "mono/metadata/mono-debug.h"
 #include "mono/metadata/class.h"
 #include "mono/metadata/reflection.h"
+#include "mono/metadata/threads.h"
 #if UE_TRACE_ENABLED
 #include "Domain/FMonoProfiler.h"
 #endif
@@ -113,6 +114,23 @@ void FMonoDomain::Deinitialize()
 	UnloadAssembly();
 
 	DeinitializeAssembly();
+}
+
+void FMonoDomain::EnsureThreadAttached()
+{
+	if (Domain == nullptr)
+	{
+		return;
+	}
+
+	// TaskGraph worker 线程可能会复用；重复 attach 在 cooperative GC 模式下可能触发线程状态断言。
+	// 这里只在当前线程尚未附着到 Mono 时才 attach。
+	if (mono_thread_current() != nullptr)
+	{
+		return;
+	}
+
+	(void)mono_thread_attach(Domain);
 }
 
 MonoObject* FMonoDomain::Object_New(MonoClass* InMonoClass)
