@@ -3,11 +3,123 @@
 #include "Domain/FMonoDomain.h"
 #include "HAL/PlatformTLS.h"
 #include "Async/TaskGraphInterfaces.h"
+#include "Misc/ScopeLock.h"
 
 namespace
 {
 	struct FTaskGraph
 	{
+		struct FManagedMethodCache
+		{
+			FCriticalSection Mutex;
+			uint64 CachedKey = 0;
+			MonoMethod* CachedMethod = nullptr;
+		};
+
+		static uint64 GetManagedLookupCacheKey()
+		{
+			const uint64 DomainKey = reinterpret_cast<uint64>(FMonoDomain::Domain);
+			const int32 ImageCount = FMonoDomain::Images.Num();
+			const uint64 ImageCountKey = static_cast<uint64>(ImageCount);
+			const uint64 FirstImageKey = ImageCount > 0 ? reinterpret_cast<uint64>(FMonoDomain::Images[0]) : 0;
+			return DomainKey ^ (ImageCountKey << 1) ^ (FirstImageKey << 3);
+		}
+
+		static MonoMethod* GetExecuteTaskMethodCached(FManagedMethodCache& Cache, const TCHAR* InManagedClassName)
+		{
+			const uint64 Key = GetManagedLookupCacheKey();
+
+			if (Cache.CachedMethod != nullptr && Cache.CachedKey == Key)
+			{
+				return Cache.CachedMethod;
+			}
+
+			FScopeLock ScopeLock(&Cache.Mutex);
+
+			if (Cache.CachedMethod != nullptr && Cache.CachedKey == Key)
+			{
+				return Cache.CachedMethod;
+			}
+
+			Cache.CachedKey = Key;
+			Cache.CachedMethod = nullptr;
+
+			const auto FoundClass = FMonoDomain::Class_From_Name(TEXT("Script.Library"), InManagedClassName);
+
+			if (FoundClass == nullptr)
+			{
+				return nullptr;
+			}
+
+			Cache.CachedMethod = FMonoDomain::Class_Get_Method_From_Name(FoundClass, TEXT("ExecuteTask"), 2);
+
+			return Cache.CachedMethod;
+		}
+
+		static void ExecuteBatchWithMethod(const void* InStateHandle,
+		                                   const int32 InTaskCount,
+		                                   const bool bWait,
+		                                   MonoMethod* InExecuteTaskMethod)
+		{
+			if (InTaskCount <= 0)
+			{
+				return;
+			}
+
+			if (!FMonoDomain::bLoadSucceed || FMonoDomain::Domain == nullptr)
+			{
+				return;
+			}
+
+			if (InExecuteTaskMethod == nullptr)
+			{
+				return;
+			}
+
+			FGraphEventArray Events;
+			Events.Reserve(InTaskCount);
+
+			void* const StateHandle = const_cast<void*>(InStateHandle);
+
+			for (int32 Index = 0; Index < InTaskCount; ++Index)
+			{
+				Events.Add(FFunctionGraphTask::CreateAndDispatchWhenReady([StateHandle, Index, InExecuteTaskMethod]()
+				{
+					if (!FMonoDomain::bLoadSucceed || FMonoDomain::Domain == nullptr)
+					{
+						return;
+					}
+
+					FMonoDomain::EnsureThreadAttached();
+
+					void* StateHandleParam = StateHandle;
+					int32 IndexParam = Index;
+
+					void* Params[2]{
+						&StateHandleParam,
+						&IndexParam
+					};
+
+					MonoObject* Exception = nullptr;
+
+					(void)FMonoDomain::Runtime_Invoke(InExecuteTaskMethod, nullptr, Params, &Exception);
+
+					if (Exception != nullptr)
+					{
+						FMonoDomain::Unhandled_Exception(Exception);
+					}
+				}, TStatId(), nullptr, ENamedThreads::AnyBackgroundThreadNormalTask));
+			}
+
+			if (bWait)
+			{
+				FTaskGraphInterface::Get().WaitUntilTasksComplete(
+					Events,
+					IsInGameThread() ? ENamedThreads::GameThread : ENamedThreads::AnyThread
+				);
+			}
+		}
+
 		static int32 GetCurrentThreadIdImplementation()
 		{
 			return static_cast<int32>(FPlatformTLS::GetCurrentThreadId());
@@ -28,14 +140,10 @@ namespace
 				return;
 			}
 
-			const auto FoundClass = FMonoDomain::Class_From_Name(TEXT("Script.Library"), InManagedClassName);
-
-			if (FoundClass == nullptr)
-			{
-				return;
-			}
-
-			const auto FoundMethod = FMonoDomain::Class_Get_Method_From_Name(FoundClass, TEXT("ExecuteTask"), 2);
+			const auto FoundMethod = FMonoDomain::Class_Get_Method_From_Name(
+				FMonoDomain::Class_From_Name(TEXT("Script.Library"), InManagedClassName),
+				TEXT("ExecuteTask"),
+				2);
 
 			if (FoundMethod == nullptr)
 			{
@@ -88,12 +196,16 @@ namespace
 
 		static void ExecuteBatchBaselineImplementation(const void* InStateHandle, const int32 InTaskCount, const bool bWait)
 		{
-			ExecuteBatchInternal(InStateHandle, InTaskCount, bWait, TEXT("TaskGraphBatchBaseline"));
+			static FManagedMethodCache Cache;
+			const auto FoundMethod = GetExecuteTaskMethodCached(Cache, TEXT("TaskGraphBatchBaseline"));
+			ExecuteBatchWithMethod(InStateHandle, InTaskCount, bWait, FoundMethod);
 		}
 
 		static void ExecuteBatchTestlineImplementation(const void* InStateHandle, const int32 InTaskCount, const bool bWait)
 		{
-			ExecuteBatchInternal(InStateHandle, InTaskCount, bWait, TEXT("TaskGraphBatchTestline"));
+			static FManagedMethodCache Cache;
+			const auto FoundMethod = GetExecuteTaskMethodCached(Cache, TEXT("TaskGraphBatchTestline"));
+			ExecuteBatchWithMethod(InStateHandle, InTaskCount, bWait, FoundMethod);
 		}
 
 		static void ExecuteBatchImplementation(const void* InStateHandle, const int32 InTaskCount, const bool bWait)
