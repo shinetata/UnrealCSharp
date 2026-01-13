@@ -13,7 +13,10 @@ namespace
 			return static_cast<int32>(FPlatformTLS::GetCurrentThreadId());
 		}
 
-		static void ExecuteBatchImplementation(const void* InStateHandle, const int32 InTaskCount, const bool bWait)
+		static void ExecuteBatchInternal(const void* InStateHandle,
+		                                 const int32 InTaskCount,
+		                                 const bool bWait,
+		                                 const TCHAR* InManagedClassName)
 		{
 			if (InTaskCount <= 0)
 			{
@@ -25,7 +28,7 @@ namespace
 				return;
 			}
 
-			const auto FoundClass = FMonoDomain::Class_From_Name(TEXT("Script.Library"), TEXT("TaskGraphBatch"));
+			const auto FoundClass = FMonoDomain::Class_From_Name(TEXT("Script.Library"), InManagedClassName);
 
 			if (FoundClass == nullptr)
 			{
@@ -83,6 +86,21 @@ namespace
 			}
 		}
 
+		static void ExecuteBatchBaselineImplementation(const void* InStateHandle, const int32 InTaskCount, const bool bWait)
+		{
+			ExecuteBatchInternal(InStateHandle, InTaskCount, bWait, TEXT("TaskGraphBatchBaseline"));
+		}
+
+		static void ExecuteBatchTestlineImplementation(const void* InStateHandle, const int32 InTaskCount, const bool bWait)
+		{
+			ExecuteBatchInternal(InStateHandle, InTaskCount, bWait, TEXT("TaskGraphBatchTestline"));
+		}
+
+		static void ExecuteBatchImplementation(const void* InStateHandle, const int32 InTaskCount, const bool bWait)
+		{
+			ExecuteBatchInternal(InStateHandle, InTaskCount, bWait, TEXT("TaskGraphBatch"));
+		}
+
 		static void EnqueueProbeImplementation(const int32 InToken)
 		{
 			const uint32 GameThreadId = FPlatformTLS::GetCurrentThreadId();
@@ -137,6 +155,8 @@ namespace
 		{
 			FClassBuilder(TEXT("FTaskGraph"), NAMESPACE_LIBRARY)
 				.Function(TEXT("GetCurrentThreadId"), GetCurrentThreadIdImplementation)
+				.Function(TEXT("ExecuteBatchBaseline"), ExecuteBatchBaselineImplementation)
+				.Function(TEXT("ExecuteBatchTestline"), ExecuteBatchTestlineImplementation)
 				.Function(TEXT("ExecuteBatch"), ExecuteBatchImplementation)
 				.Function(TEXT("EnqueueProbe"), EnqueueProbeImplementation);
 		}
