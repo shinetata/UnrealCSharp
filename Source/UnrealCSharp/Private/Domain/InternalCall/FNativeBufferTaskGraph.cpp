@@ -9,7 +9,7 @@ namespace
 {
 	struct FNativeBufferTaskGraph
 	{
-		static int64 AddOneAndSumInt32ParallelImplementation(const void* InData, const int32 InLength, const int32 InTaskCount)
+		static int64 AddOneAndSumInt32ParallelInternal(const void* InData, const int32 InLength, const int32 InTaskCount, const bool bLogTasks)
 		{
 			if (InData == nullptr || InLength <= 0)
 			{
@@ -26,7 +26,7 @@ namespace
 			FGraphEventArray Events;
 			Events.Reserve(SafeTaskCount);
 
-			const uint32 DispatchThreadId = FPlatformTLS::GetCurrentThreadId();
+			const uint32 DispatchThreadId = bLogTasks ? FPlatformTLS::GetCurrentThreadId() : 0;
 
 			const int32 ChunkSize = (InLength + SafeTaskCount - 1) / SafeTaskCount;
 
@@ -35,17 +35,19 @@ namespace
 				const int32 Start = TaskIndex * ChunkSize;
 				const int32 End = FMath::Min(Start + ChunkSize, InLength);
 
-				Events.Add(FFunctionGraphTask::CreateAndDispatchWhenReady([Data, Start, End, TaskIndex, DispatchThreadId, &PartialSums]()
+				Events.Add(FFunctionGraphTask::CreateAndDispatchWhenReady([Data, Start, End, TaskIndex, DispatchThreadId, bLogTasks, &PartialSums]()
 				{
-					const uint32 WorkerThreadId = FPlatformTLS::GetCurrentThreadId();
-
-					UE_LOG(LogUnrealCSharp, Log,
-					       TEXT("[NativeBufferTaskGraph] task=%d range=[%d,%d) DispatchTid=%u WorkerTid=%u"),
-					       TaskIndex,
-					       Start,
-					       End,
-					       DispatchThreadId,
-					       WorkerThreadId);
+					if (bLogTasks)
+					{
+						const uint32 WorkerThreadId = FPlatformTLS::GetCurrentThreadId();
+						UE_LOG(LogUnrealCSharp, Log,
+						       TEXT("[NativeBufferTaskGraph] task=%d range=[%d,%d) DispatchTid=%u WorkerTid=%u"),
+						       TaskIndex,
+						       Start,
+						       End,
+						       DispatchThreadId,
+						       WorkerThreadId);
+					}
 
 					int64 LocalSum = 0;
 					for (int32 i = Start; i < End; ++i)
@@ -71,10 +73,21 @@ namespace
 			return Sum;
 		}
 
+		static int64 AddOneAndSumInt32ParallelImplementation(const void* InData, const int32 InLength, const int32 InTaskCount)
+		{
+			return AddOneAndSumInt32ParallelInternal(InData, InLength, InTaskCount, true);
+		}
+
+		static int64 AddOneAndSumInt32ParallelNoLogImplementation(const void* InData, const int32 InLength, const int32 InTaskCount)
+		{
+			return AddOneAndSumInt32ParallelInternal(InData, InLength, InTaskCount, false);
+		}
+
 		FNativeBufferTaskGraph()
 		{
 			FClassBuilder(TEXT("FNativeBufferTaskGraph"), NAMESPACE_LIBRARY)
-				.Function(TEXT("AddOneAndSumInt32Parallel"), AddOneAndSumInt32ParallelImplementation);
+				.Function(TEXT("AddOneAndSumInt32Parallel"), AddOneAndSumInt32ParallelImplementation)
+				.Function(TEXT("AddOneAndSumInt32ParallelNoLog"), AddOneAndSumInt32ParallelNoLogImplementation);
 		}
 	};
 
