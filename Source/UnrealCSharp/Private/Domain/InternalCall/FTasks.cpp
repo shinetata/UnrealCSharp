@@ -46,11 +46,11 @@ namespace
 			bool bDetachOnExit = false;
 		};
 
-		struct FManagedMethodCache
+		struct FManagedThunkCache
 		{
 			FCriticalSection Mutex;
 			uint64 CachedKey = 0;
-			MonoMethod* CachedMethod = nullptr;
+			void* CachedThunk = nullptr;
 		};
 
 		static uint64 GetManagedLookupCacheKey()
@@ -62,24 +62,27 @@ namespace
 			return DomainKey ^ (ImageCountKey << 1) ^ (FirstImageKey << 3);
 		}
 
-		static MonoMethod* GetExecuteTaskMethodCached(FManagedMethodCache& Cache, const TCHAR* InManagedClassName)
+		static void* GetManagedThunkCached(FManagedThunkCache& Cache,
+		                                   const TCHAR* InManagedClassName,
+		                                   const TCHAR* InMethodName,
+		                                   const int32 InParamCount)
 		{
 			const uint64 Key = GetManagedLookupCacheKey();
 
-			if (Cache.CachedMethod != nullptr && Cache.CachedKey == Key)
+			if (Cache.CachedThunk != nullptr && Cache.CachedKey == Key)
 			{
-				return Cache.CachedMethod;
+				return Cache.CachedThunk;
 			}
 
 			FScopeLock ScopeLock(&Cache.Mutex);
 
-			if (Cache.CachedMethod != nullptr && Cache.CachedKey == Key)
+			if (Cache.CachedThunk != nullptr && Cache.CachedKey == Key)
 			{
-				return Cache.CachedMethod;
+				return Cache.CachedThunk;
 			}
 
 			Cache.CachedKey = Key;
-			Cache.CachedMethod = nullptr;
+			Cache.CachedThunk = nullptr;
 
 			const auto FoundClass = FMonoDomain::Class_From_Name(TEXT("Script.Library"), InManagedClassName);
 
@@ -88,15 +91,22 @@ namespace
 				return nullptr;
 			}
 
-			Cache.CachedMethod = FMonoDomain::Class_Get_Method_From_Name(FoundClass, TEXT("ExecuteTask"), 2);
+			const auto FoundMethod = FMonoDomain::Class_Get_Method_From_Name(FoundClass, InMethodName, InParamCount);
 
-			return Cache.CachedMethod;
+			if (FoundMethod == nullptr)
+			{
+				return nullptr;
+			}
+
+			Cache.CachedThunk = FMonoDomain::Method_Get_Unmanaged_Thunk(FoundMethod);
+
+			return Cache.CachedThunk;
 		}
 
-		static void ExecuteBatchWithMethod(const void* InStateHandle,
+		static void ExecuteBatchWithThunk(const void* InStateHandle,
 		                                   const int32 InTaskCount,
 		                                   const bool bWait,
-		                                   MonoMethod* InExecuteTaskMethod)
+		                                   void* InExecuteTaskThunk)
 		{
 			if (InTaskCount <= 0)
 			{
@@ -113,7 +123,7 @@ namespace
 				return;
 			}
 
-			if (InExecuteTaskMethod == nullptr)
+			if (InExecuteTaskThunk == nullptr)
 			{
 				return;
 			}
@@ -123,10 +133,10 @@ namespace
 
 			void* const StateHandle = const_cast<void*>(InStateHandle);
 
-			for (int32 Index = 0; Index < InTaskCount; ++Index)
+			for (int32 TaskIndex = 0; TaskIndex < InTaskCount; ++TaskIndex)
 			{
 				UE::Tasks::FTask Task;
-				Task.Launch(TEXT("UETasks.ExecuteBatch"), [StateHandle, Index, InExecuteTaskMethod]()
+				Task.Launch(TEXT("UETasks.ExecuteBatch"), [StateHandle, TaskIndex, InExecuteTaskThunk]()
 				{
 					FManagedJobScope ManagedScope;
 
@@ -136,16 +146,15 @@ namespace
 					}
 
 					void* StateHandleParam = StateHandle;
-					int32 IndexParam = Index;
 
-					void* Params[2]{
-						&StateHandleParam,
-						&IndexParam
-					};
+					int32 IndexParam = TaskIndex;
+
+					using FExecuteTaskThunk = void (*)(void*, int32, MonoObject**);
+					const auto Thunk = reinterpret_cast<FExecuteTaskThunk>(InExecuteTaskThunk);
 
 					MonoObject* Exception = nullptr;
 
-					(void)FMonoDomain::Runtime_Invoke(InExecuteTaskMethod, nullptr, Params, &Exception);
+					Thunk(StateHandleParam, IndexParam, &Exception);
 
 					if (Exception != nullptr)
 					{
@@ -162,11 +171,13 @@ namespace
 			}
 		}
 
-		static void ExecuteBatchImplementation(const void* InStateHandle, const int32 InTaskCount, const bool bWait)
+		static void ExecuteBatchImplementation(const void* InStateHandle,
+		                                       const int32 InTaskCount,
+		                                       const bool bWait)
 		{
-			static FManagedMethodCache Cache;
-			const auto FoundMethod = GetExecuteTaskMethodCached(Cache, TEXT("UETasksBatch"));
-			ExecuteBatchWithMethod(InStateHandle, InTaskCount, bWait, FoundMethod);
+			static FManagedThunkCache ExecuteCache;
+			const auto FoundThunk = GetManagedThunkCached(ExecuteCache, TEXT("UETasksBatch"), TEXT("ExecuteTask"), 2);
+			ExecuteBatchWithThunk(InStateHandle, InTaskCount, bWait, FoundThunk);
 		}
 
 		FTasks()
