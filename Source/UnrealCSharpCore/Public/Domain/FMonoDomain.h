@@ -288,6 +288,8 @@ private:
 	static FThreadSafeCounter ManagedJobsInFlight;
 
 	static FEvent* ManagedJobsDrainEvent;
+
+	static bool bDebuggingEnabled;
 };
 
 #include "FMonoDomain.inl"

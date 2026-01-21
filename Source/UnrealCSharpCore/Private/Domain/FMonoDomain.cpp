@@ -45,6 +45,8 @@ FThreadSafeCounter FMonoDomain::ManagedJobsInFlight;
 
 FEvent* FMonoDomain::ManagedJobsDrainEvent = nullptr;
 
+bool FMonoDomain::bDebuggingEnabled = false;
+
 #if PLATFORM_IOS
 extern void* mono_aot_module_System_Private_CoreLib_info;
 #endif
@@ -84,7 +86,9 @@ void FMonoDomain::Initialize(const FMonoDomainInitializeParams& InParams)
 		if (const auto UnrealCSharpSetting = FUnrealCSharpFunctionLibrary::GetMutableDefaultSafe<
 			UUnrealCSharpSetting>())
 		{
-			if (UnrealCSharpSetting->IsEnableDebug())
+			bDebuggingEnabled = UnrealCSharpSetting->IsEnableDebug();
+
+			if (bDebuggingEnabled)
 			{
 				const auto Config = FString::Printf(TEXT(
 					"--debugger-agent=transport=dt_socket,server=y,suspend=n,address=%s:%d"
@@ -127,6 +131,8 @@ void FMonoDomain::Deinitialize()
 	UnloadAssembly();
 
 	DeinitializeAssembly();
+
+	bDebuggingEnabled = false;
 }
 
 void FMonoDomain::EnsureThreadAttached()
@@ -237,7 +243,7 @@ void FMonoDomain::WaitForManagedJobDrain()
 bool FMonoDomain::ShouldDetachAfterManagedJob()
 {
 #if WITH_EDITOR
-	return true;
+	return !bDebuggingEnabled;
 #else
 	return false;
 #endif
