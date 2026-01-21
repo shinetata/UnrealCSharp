@@ -15,6 +15,7 @@
 #include "mono/metadata/class.h"
 #include "mono/metadata/reflection.h"
 #include "mono/metadata/threads.h"
+#include "HAL/PlatformProcess.h"
 #if UE_TRACE_ENABLED
 #include "Domain/FMonoProfiler.h"
 #endif
@@ -38,12 +39,20 @@ TArray<MonoImage*> FMonoDomain::Images;
 
 bool FMonoDomain::bLoadSucceed;
 
+std::atomic<bool> FMonoDomain::bManagedJobsEnabled = false;
+
+FThreadSafeCounter FMonoDomain::ManagedJobsInFlight;
+
+FEvent* FMonoDomain::ManagedJobsDrainEvent = nullptr;
+
 #if PLATFORM_IOS
 extern void* mono_aot_module_System_Private_CoreLib_info;
 #endif
 
 void FMonoDomain::Initialize(const FMonoDomainInitializeParams& InParams)
 {
+	EnableManagedJobExecution();
+
 	RegisterMonoTrace();
 
 	RegisterAssemblyPreloadHook();
@@ -111,6 +120,10 @@ void FMonoDomain::Initialize(const FMonoDomainInitializeParams& InParams)
 
 void FMonoDomain::Deinitialize()
 {
+	DisableManagedJobExecution();
+
+	WaitForManagedJobDrain();
+
 	UnloadAssembly();
 
 	DeinitializeAssembly();
@@ -131,6 +144,103 @@ void FMonoDomain::EnsureThreadAttached()
 	}
 
 	(void)mono_thread_attach(Domain);
+}
+
+void FMonoDomain::EnsureThreadDetached()
+{
+	if (mono_thread_current() == nullptr)
+	{
+		return;
+	}
+
+	mono_thread_detach(mono_thread_current());
+}
+
+bool FMonoDomain::IsManagedJobExecutionEnabled()
+{
+	return bManagedJobsEnabled.load(std::memory_order_acquire);
+}
+
+bool FMonoDomain::TryEnterManagedJobExecution()
+{
+	if (!IsManagedJobExecutionEnabled())
+	{
+		return false;
+	}
+
+	if (!bLoadSucceed || Domain == nullptr)
+	{
+		return false;
+	}
+
+	ManagedJobsInFlight.Increment();
+
+	if (!IsManagedJobExecutionEnabled() || !bLoadSucceed || Domain == nullptr)
+	{
+		ManagedJobsInFlight.Decrement();
+		return false;
+	}
+
+	return true;
+}
+
+void FMonoDomain::LeaveManagedJobExecution()
+{
+	const int32 Remaining = ManagedJobsInFlight.Decrement();
+
+	if (Remaining == 0 && !IsManagedJobExecutionEnabled() && ManagedJobsDrainEvent != nullptr)
+	{
+		ManagedJobsDrainEvent->Trigger();
+	}
+}
+
+void FMonoDomain::EnableManagedJobExecution()
+{
+	if (ManagedJobsDrainEvent == nullptr)
+	{
+		ManagedJobsDrainEvent = FPlatformProcess::GetSynchEventFromPool(true);
+	}
+
+	if (ManagedJobsDrainEvent != nullptr)
+	{
+		ManagedJobsDrainEvent->Reset();
+	}
+
+	bManagedJobsEnabled.store(true, std::memory_order_release);
+}
+
+void FMonoDomain::DisableManagedJobExecution()
+{
+	if (ManagedJobsDrainEvent == nullptr)
+	{
+		ManagedJobsDrainEvent = FPlatformProcess::GetSynchEventFromPool(true);
+	}
+
+	bManagedJobsEnabled.store(false, std::memory_order_release);
+
+	if (ManagedJobsInFlight.GetValue() == 0 && ManagedJobsDrainEvent != nullptr)
+	{
+		ManagedJobsDrainEvent->Trigger();
+	}
+}
+
+void FMonoDomain::WaitForManagedJobDrain()
+{
+	if (ManagedJobsInFlight.GetValue() == 0 || ManagedJobsDrainEvent == nullptr)
+	{
+		return;
+	}
+
+	ManagedJobsDrainEvent->Wait();
+}
+
+bool FMonoDomain::ShouldDetachAfterManagedJob()
+{
+#if WITH_EDITOR
+	return true;
+#else
+	return false;
+#endif
 }
 
 MonoObject* FMonoDomain::Object_New(MonoClass* InMonoClass)

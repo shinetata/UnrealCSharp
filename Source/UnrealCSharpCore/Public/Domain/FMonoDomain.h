@@ -2,7 +2,11 @@
 
 #include "FMonoObjectTypes.h"
 #include "FMonoDomainInitializeParams.h"
+#include "HAL/ThreadSafeCounter.h"
 #include "mono/metadata/appdomain.h"
+#include <atomic>
+
+class FEvent;
 
 class UNREALCSHARPCORE_API FMonoDomain
 {
@@ -13,6 +17,22 @@ public:
 
 public:
 	static void EnsureThreadAttached();
+
+	static void EnsureThreadDetached();
+
+	static bool IsManagedJobExecutionEnabled();
+
+	static bool TryEnterManagedJobExecution();
+
+	static void LeaveManagedJobExecution();
+
+	static void EnableManagedJobExecution();
+
+	static void DisableManagedJobExecution();
+
+	static void WaitForManagedJobDrain();
+
+	static bool ShouldDetachAfterManagedJob();
 
 	static MonoObject* Object_New(MonoClass* InMonoClass);
 
@@ -261,6 +281,13 @@ public:
 	static TArray<MonoImage*> Images;
 
 	static bool bLoadSucceed;
+
+private:
+	static std::atomic<bool> bManagedJobsEnabled;
+
+	static FThreadSafeCounter ManagedJobsInFlight;
+
+	static FEvent* ManagedJobsDrainEvent;
 };
 
 #include "FMonoDomain.inl"

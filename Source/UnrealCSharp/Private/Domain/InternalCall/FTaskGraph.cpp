@@ -9,6 +9,43 @@ namespace
 {
 	struct FTaskGraph
 	{
+		struct FManagedJobScope
+		{
+			explicit FManagedJobScope()
+				: bEntered(FMonoDomain::TryEnterManagedJobExecution())
+				, bDetachOnExit(FMonoDomain::ShouldDetachAfterManagedJob() && !IsInGameThread())
+			{
+				if (bEntered)
+				{
+					FMonoDomain::EnsureThreadAttached();
+				}
+			}
+
+			~FManagedJobScope()
+			{
+				if (!bEntered)
+				{
+					return;
+				}
+
+				if (bDetachOnExit)
+				{
+					FMonoDomain::EnsureThreadDetached();
+				}
+
+				FMonoDomain::LeaveManagedJobExecution();
+			}
+
+			bool IsEntered() const
+			{
+				return bEntered;
+			}
+
+		private:
+			bool bEntered = false;
+			bool bDetachOnExit = false;
+		};
+
 		struct FManagedMethodCache
 		{
 			FCriticalSection Mutex;
@@ -71,6 +108,11 @@ namespace
 				return;
 			}
 
+			if (!FMonoDomain::IsManagedJobExecutionEnabled())
+			{
+				return;
+			}
+
 			if (InExecuteTaskMethod == nullptr)
 			{
 				return;
@@ -85,12 +127,12 @@ namespace
 			{
 				Events.Add(FFunctionGraphTask::CreateAndDispatchWhenReady([StateHandle, Index, InExecuteTaskMethod]()
 				{
-					if (!FMonoDomain::bLoadSucceed || FMonoDomain::Domain == nullptr)
+					FManagedJobScope ManagedScope;
+
+					if (!ManagedScope.IsEntered())
 					{
 						return;
 					}
-
-					FMonoDomain::EnsureThreadAttached();
 
 					void* StateHandleParam = StateHandle;
 					int32 IndexParam = Index;
@@ -140,6 +182,11 @@ namespace
 				return;
 			}
 
+			if (!FMonoDomain::IsManagedJobExecutionEnabled())
+			{
+				return;
+			}
+
 			const auto FoundMethod = FMonoDomain::Class_Get_Method_From_Name(
 				FMonoDomain::Class_From_Name(TEXT("Script.Library"), InManagedClassName),
 				TEXT("ExecuteTask"),
@@ -159,12 +206,12 @@ namespace
 			{
 				Events.Add(FFunctionGraphTask::CreateAndDispatchWhenReady([StateHandle, Index, FoundMethod]()
 				{
-					if (!FMonoDomain::bLoadSucceed || FMonoDomain::Domain == nullptr)
+					FManagedJobScope ManagedScope;
+
+					if (!ManagedScope.IsEntered())
 					{
 						return;
 					}
-
-					FMonoDomain::EnsureThreadAttached();
 
 					void* StateHandleParam = StateHandle;
 					int32 IndexParam = Index;
@@ -212,7 +259,7 @@ namespace
 		{
 			ExecuteBatchInternal(InStateHandle, InTaskCount, bWait, TEXT("TaskGraphBatch"));
 		}
-
+ 
 		static void EnqueueProbeImplementation(const int32 InToken)
 		{
 			const uint32 GameThreadId = FPlatformTLS::GetCurrentThreadId();
@@ -224,7 +271,17 @@ namespace
 					return;
 				}
 
-				FMonoDomain::EnsureThreadAttached();
+				if (!FMonoDomain::IsManagedJobExecutionEnabled())
+				{
+					return;
+				}
+
+				FManagedJobScope ManagedScope;
+
+				if (!ManagedScope.IsEntered())
+				{
+					return;
+				}
 
 				const uint32 WorkerThreadId = FPlatformTLS::GetCurrentThreadId();
 
