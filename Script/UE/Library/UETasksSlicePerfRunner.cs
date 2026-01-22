@@ -7,6 +7,59 @@ namespace Script.Library;
 
 public static class UETasksSlicePerfRunner
 {
+    public static void RunNativeBufferAddOneAndSumCompareByHandler(
+        int length = 500_000,
+        int taskCount = 16,
+        int iterations = 64,
+        int warmup = 5,
+        int rounds = 5)
+    {
+        ValidateArgs(length, taskCount, iterations, warmup, rounds);
+
+        var safeTaskCount = Math.Clamp(taskCount, 1, length);
+        var ueTasksMs = new double[rounds];
+        var parallelForMs = new double[rounds];
+        var taskRunMs = new double[rounds];
+
+        for (var r = 0; r < rounds; r++)
+        {
+            long sumUeTasks = 0;
+            long sumParallelFor = 0;
+            long sumTaskRun = 0;
+            double ueMs;
+            double pfMs;
+            double trMs;
+            const string order = "UE(Handler)->PF->TR";
+
+            ForceGc();
+            ueMs = MeasureUeTasksNativeByHandler(length, safeTaskCount, iterations, warmup, out sumUeTasks);
+            ForceGc();
+            pfMs = MeasureParallelForNative(length, safeTaskCount, iterations, warmup, out sumParallelFor);
+            ForceGc();
+            trMs = MeasureTaskRunNative(length, safeTaskCount, iterations, warmup, out sumTaskRun);
+
+            ueTasksMs[r] = ueMs;
+            parallelForMs[r] = pfMs;
+            taskRunMs[r] = trMs;
+
+            var sumOk = sumUeTasks == sumParallelFor && sumUeTasks == sumTaskRun;
+            Console.WriteLine(
+                $"[UETasksSliceNativeByHandlerRound] round={r + 1}/{rounds} order={order} " +
+                $"ue={ueMs:F3}ms pf={pfMs:F3}ms tr={trMs:F3}ms sumOk={sumOk}");
+        }
+
+        PrintAverageSummary(
+            tag: "UETasksSliceNativeByHandlerSummary",
+            length: length,
+            taskCount: safeTaskCount,
+            iterations: iterations,
+            warmup: warmup,
+            rounds: rounds,
+            ueTasksMs: ueTasksMs,
+            parallelForMs: parallelForMs,
+            taskRunMs: taskRunMs);
+    }
+
     public static void RunManagedPinnedAddOneAndSumCompare(
         int length = 500_000,
         int taskCount = 16,
@@ -148,6 +201,31 @@ public static class UETasksSlicePerfRunner
         for (var i = 0; i < iterations; i++)
         {
             sum = RunUeTasksSliceManaged(data, taskCount);
+        }
+        sw.Stop();
+
+        return sw.Elapsed.TotalMilliseconds;
+    }
+
+    private static double MeasureUeTasksNativeByHandler(
+        int length,
+        int taskCount,
+        int iterations,
+        int warmup,
+        out long sum)
+    {
+        using var data = BuildNativeBuffer(length);
+        sum = 0;
+
+        for (var i = 0; i < warmup; i++)
+        {
+            sum = RunUeTasksSliceNativeByHandler(data, taskCount);
+        }
+
+        var sw = Stopwatch.StartNew();
+        for (var i = 0; i < iterations; i++)
+        {
+            sum = RunUeTasksSliceNativeByHandler(data, taskCount);
         }
         sw.Stop();
 
@@ -418,6 +496,12 @@ public static class UETasksSlicePerfRunner
         });
 
         return sum;
+    }
+
+    private static long RunUeTasksSliceNativeByHandler(NativeBuffer<int> data, int taskCount)
+    {
+        // 走“C# handler 作为参数传给 C++”的新入口（方案B）。
+        return UETasksSliceBatch.RunNativeAddOneAndSumByHandler(data, taskCount);
     }
 
     private static unsafe long RunTaskRunOnceNative(NativeBuffer<int> data, int taskCount)
