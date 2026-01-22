@@ -245,6 +245,11 @@ public static class UETasksSliceBatch
         {
             ptr[i] += 1;
             local += ptr[i];
+            for (var j = 0; j < 1000; j++)
+            {
+                var temp = j;
+                temp++;
+            }
         }
 
         Interlocked.Add(ref Sum, local);

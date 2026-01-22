@@ -269,21 +269,7 @@ public static class UETasksSlicePerfRunner
         out long sum)
     {
         var data = BuildManagedData(length);
-        sum = 0;
-
-        for (var i = 0; i < warmup; i++)
-        {
-            sum = RunTaskRunOnceManaged(data, taskCount);
-        }
-
-        var sw = Stopwatch.StartNew();
-        for (var i = 0; i < iterations; i++)
-        {
-            sum = RunTaskRunOnceManaged(data, taskCount);
-        }
-        sw.Stop();
-
-        return sw.Elapsed.TotalMilliseconds;
+        return MeasureTaskRunPooledManaged(data, taskCount, iterations, warmup, out sum);
     }
 
     private static long RunParallelForOnceManaged(int[] data, int taskCount, ParallelOptions options)
@@ -407,21 +393,169 @@ public static class UETasksSlicePerfRunner
         out long sum)
     {
         using var data = BuildNativeBuffer(length);
+        return MeasureTaskRunPooledNative(data, taskCount, iterations, warmup, out sum);
+    }
+
+    // Task.Run 设计（B）：只创建 taskCount 个 worker task（线程池），每轮用同步栅栏触发执行，避免“每轮 new Task”的开销。
+    // 这不是“最贴近日常写法”的 Task.Run，而是更偏“榨干并行吞吐”的对比基线。
+    private static double MeasureTaskRunPooledManaged(int[] data, int taskCount, int iterations, int warmup, out long sum)
+    {
+        var len = data.Length;
+        var chunkSize = (len + taskCount - 1) / taskCount;
+        var locals = new long[taskCount];
         sum = 0;
+
+        ThreadPool.GetMinThreads(out var oldMinWorkers, out var oldMinIo);
+        ThreadPool.SetMinThreads(workerThreads: Math.Max(oldMinWorkers, taskCount), completionPortThreads: oldMinIo);
+
+        using var startBarrier = new Barrier(taskCount + 1);
+        using var endBarrier = new Barrier(taskCount + 1);
+        var stop = false;
+
+        var workers = new Task[taskCount];
+        for (var taskIndex = 0; taskIndex < taskCount; taskIndex++)
+        {
+            var start = taskIndex * chunkSize;
+            var end = Math.Min(start + chunkSize, len);
+            var slot = taskIndex;
+
+            workers[taskIndex] = Task.Run(() =>
+            {
+                while (true)
+                {
+                    startBarrier.SignalAndWait();
+
+                    if (Volatile.Read(ref stop))
+                    {
+                        endBarrier.SignalAndWait();
+                        break;
+                    }
+
+                    long local = 0;
+                    for (var i = start; i < end; i++)
+                    {
+                        data[i] += 1;
+                        local += data[i];
+                    }
+
+                    locals[slot] = local;
+                    endBarrier.SignalAndWait();
+                }
+            });
+        }
 
         for (var i = 0; i < warmup; i++)
         {
-            sum = RunTaskRunOnceNative(data, taskCount);
+            startBarrier.SignalAndWait();
+            endBarrier.SignalAndWait();
+            sum = SumLocals(locals);
         }
 
         var sw = Stopwatch.StartNew();
         for (var i = 0; i < iterations; i++)
         {
-            sum = RunTaskRunOnceNative(data, taskCount);
+            startBarrier.SignalAndWait();
+            endBarrier.SignalAndWait();
+            sum = SumLocals(locals);
         }
         sw.Stop();
 
+        Volatile.Write(ref stop, true);
+        startBarrier.SignalAndWait();
+        endBarrier.SignalAndWait();
+
+        Task.WaitAll(workers);
+        ThreadPool.SetMinThreads(workerThreads: oldMinWorkers, completionPortThreads: oldMinIo);
+
         return sw.Elapsed.TotalMilliseconds;
+    }
+
+    private static unsafe double MeasureTaskRunPooledNative(NativeBuffer<int> data, int taskCount, int iterations, int warmup, out long sum)
+    {
+        var len = data.Length;
+        var chunkSize = (len + taskCount - 1) / taskCount;
+        var ptr = (int*)data.Ptr;
+        var locals = new long[taskCount];
+        sum = 0;
+
+        ThreadPool.GetMinThreads(out var oldMinWorkers, out var oldMinIo);
+        ThreadPool.SetMinThreads(workerThreads: Math.Max(oldMinWorkers, taskCount), completionPortThreads: oldMinIo);
+
+        using var startBarrier = new Barrier(taskCount + 1);
+        using var endBarrier = new Barrier(taskCount + 1);
+        var stop = false;
+
+        var workers = new Task[taskCount];
+        for (var taskIndex = 0; taskIndex < taskCount; taskIndex++)
+        {
+            var start = taskIndex * chunkSize;
+            var end = Math.Min(start + chunkSize, len);
+            var slot = taskIndex;
+
+            workers[taskIndex] = Task.Run(() =>
+            {
+                while (true)
+                {
+                    startBarrier.SignalAndWait();
+
+                    if (Volatile.Read(ref stop))
+                    {
+                        endBarrier.SignalAndWait();
+                        break;
+                    }
+
+                    long local = 0;
+                    for (var i = start; i < end; i++)
+                    {
+                        ptr[i] += 1;
+                        local += ptr[i];
+                        for (var j = 0; j < 1000; j++)
+                        {
+                            var temp = j;
+                            temp++;
+                        }
+                    }
+
+                    locals[slot] = local;
+                    endBarrier.SignalAndWait();
+                }
+            });
+        }
+
+        for (var i = 0; i < warmup; i++)
+        {
+            startBarrier.SignalAndWait();
+            endBarrier.SignalAndWait();
+            sum = SumLocals(locals);
+        }
+
+        var sw = Stopwatch.StartNew();
+        for (var i = 0; i < iterations; i++)
+        {
+            startBarrier.SignalAndWait();
+            endBarrier.SignalAndWait();
+            sum = SumLocals(locals);
+        }
+        sw.Stop();
+
+        Volatile.Write(ref stop, true);
+        startBarrier.SignalAndWait();
+        endBarrier.SignalAndWait();
+
+        Task.WaitAll(workers);
+        ThreadPool.SetMinThreads(workerThreads: oldMinWorkers, completionPortThreads: oldMinIo);
+
+        return sw.Elapsed.TotalMilliseconds;
+    }
+
+    private static long SumLocals(long[] locals)
+    {
+        long sum = 0;
+        for (var i = 0; i < locals.Length; i++)
+        {
+            sum += locals[i];
+        }
+        return sum;
     }
 
     private static unsafe long RunParallelForOnceNative(NativeBuffer<int> data, int taskCount, ParallelOptions options)
@@ -442,6 +576,11 @@ public static class UETasksSlicePerfRunner
                 {
                     ptr[i] += 1;
                     local += ptr[i];
+                    for (var j = 0; j < 1000; j++)
+                    {
+                        var temp = j;
+                        temp++;
+                    }
                 }
 
                 return local;
@@ -522,6 +661,11 @@ public static class UETasksSlicePerfRunner
                 {
                     ptr[i] += 1;
                     local += ptr[i];
+                    for (var j = 0; j < 1000; j++)
+                    {
+                        var temp = j;
+                        temp++;
+                    }
                 }
                 return local;
             });
