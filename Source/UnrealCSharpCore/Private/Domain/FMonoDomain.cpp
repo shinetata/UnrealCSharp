@@ -53,6 +53,7 @@ extern void* mono_aot_module_System_Private_CoreLib_info;
 
 void FMonoDomain::Initialize(const FMonoDomainInitializeParams& InParams)
 {
+	EnableManagedJobExecution();
 	RegisterMonoTrace();
 
 	RegisterAssemblyPreloadHook();
@@ -84,7 +85,8 @@ void FMonoDomain::Initialize(const FMonoDomainInitializeParams& InParams)
 		if (const auto UnrealCSharpSetting = FUnrealCSharpFunctionLibrary::GetMutableDefaultSafe<
 			UUnrealCSharpSetting>())
 		{
-			if (UnrealCSharpSetting->IsEnableDebug())
+			bDebuggingEnabled = UnrealCSharpSetting->IsEnableDebug();
+			if (bDebuggingEnabled)
 			{
 				const auto Config = FString::Printf(TEXT(
 					"--debugger-agent=transport=dt_socket,server=y,suspend=n,address=%s:%d"
@@ -120,9 +122,13 @@ void FMonoDomain::Initialize(const FMonoDomainInitializeParams& InParams)
 
 void FMonoDomain::Deinitialize()
 {
+	DisableManagedJobExecution();
+	WaitForManagedJobDrain();
+	
 	UnloadAssembly();
 
 	DeinitializeAssembly();
+	bDebuggingEnabled = false;
 }
 
 void FMonoDomain::EnsureThreadAttached()
