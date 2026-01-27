@@ -23,6 +23,6 @@ public static class UETasksSliceDelegateInvokeDemo
     {
         Console.WriteLine(
             $"[UETasksDelegateInvokeDemo] managedTid={Thread.CurrentThread.ManagedThreadId} " +
-            $"TaskThreadId={TaskGraphBatch.GetCurrentNativeThreadId()}");
+            $"TaskThreadId={""}");
     }
 }
