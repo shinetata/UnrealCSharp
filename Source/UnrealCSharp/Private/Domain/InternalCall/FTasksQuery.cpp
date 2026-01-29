@@ -7,6 +7,7 @@
 #include "Misc/ScopeLock.h"
 #include "Setting/UnrealCSharpSetting.h"
 #include "Common/FUnrealCSharpFunctionLibrary.h"
+#include <atomic>
 
 namespace
 {
@@ -55,6 +56,10 @@ namespace
 			uint64 CachedKey = 0;
 			void* CachedThunk = nullptr;
 		};
+
+		static std::atomic<int64> NextHandleId;
+		static FCriticalSection HandleMutex;
+		static TMap<int64, TArray<UE::Tasks::FTask>> HandleTasks;
 
 		static bool IsDebugSingleThread()
 		{
@@ -197,6 +202,159 @@ namespace
 			}
 		}
 
+		static int64 ScheduleBatchImplementation(const void* InStateHandle, const int32 InTaskCount)
+		{
+			if (InTaskCount <= 0)
+			{
+				return 0;
+			}
+
+			if (!FMonoDomain::bLoadSucceed || FMonoDomain::Domain == nullptr)
+			{
+				return 0;
+			}
+
+			if (!FMonoDomain::IsManagedJobExecutionEnabled())
+			{
+				return 0;
+			}
+
+			static FManagedThunkCache ExecuteCache;
+			const auto FoundThunk = GetManagedThunkCached(
+				ExecuteCache, TEXT("UETasksQueryRunner"), TEXT("ExecuteTask"), 2);
+
+			if (FoundThunk == nullptr)
+			{
+				return 0;
+			}
+
+			void* const StateHandle = const_cast<void*>(InStateHandle);
+			using FExecuteTaskThunk = void (*)(void*, int32, MonoObject**);
+			const auto Thunk = reinterpret_cast<FExecuteTaskThunk>(FoundThunk);
+
+			auto ExecuteOne = [StateHandle, Thunk](int32 TaskIndex)
+			{
+				MonoObject* Exception = nullptr;
+				Thunk(StateHandle, TaskIndex, &Exception);
+				if (Exception != nullptr)
+				{
+					FMonoDomain::Unhandled_Exception(Exception);
+				}
+			};
+
+			if (IsDebugSingleThread())
+			{
+				for (int32 TaskIndex = 0; TaskIndex < InTaskCount; ++TaskIndex)
+				{
+					ExecuteOne(TaskIndex);
+				}
+				return 0;
+			}
+
+			TArray<UE::Tasks::FTask> TaskList;
+			TaskList.Reserve(InTaskCount);
+
+			for (int32 TaskIndex = 0; TaskIndex < InTaskCount; ++TaskIndex)
+			{
+				UE::Tasks::FTask Task;
+				Task.Launch(TEXT("UETasksQuery.ScheduleBatch"), [TaskIndex, ExecuteOne]()
+				{
+					FManagedJobScope ManagedScope;
+
+					if (!ManagedScope.IsEntered())
+					{
+						return;
+					}
+
+					ExecuteOne(TaskIndex);
+				});
+
+				TaskList.Add(MoveTemp(Task));
+			}
+
+			const int64 HandleId = NextHandleId.fetch_add(1);
+			{
+				FScopeLock ScopeLock(&HandleMutex);
+				HandleTasks.Add(HandleId, MoveTemp(TaskList));
+			}
+
+			return HandleId;
+		}
+
+		static bool IsHandleCompletedImplementation(const int64 InHandleId)
+		{
+			if (InHandleId <= 0)
+			{
+				return true;
+			}
+
+			FScopeLock ScopeLock(&HandleMutex);
+			const auto TasksPtr = HandleTasks.Find(InHandleId);
+			if (TasksPtr == nullptr)
+			{
+				return true;
+			}
+
+			for (const auto& Task : *TasksPtr)
+			{
+				if (!Task.IsCompleted())
+				{
+					return false;
+				}
+			}
+
+			return true;
+		}
+
+		static void WaitHandleImplementation(const int64 InHandleId)
+		{
+			if (InHandleId <= 0)
+			{
+				return;
+			}
+
+			TArray<UE::Tasks::FTask> TasksCopy;
+			{
+				FScopeLock ScopeLock(&HandleMutex);
+				const auto TasksPtr = HandleTasks.Find(InHandleId);
+				if (TasksPtr == nullptr)
+				{
+					return;
+				}
+				TasksCopy = *TasksPtr;
+			}
+
+			if (TasksCopy.Num() > 0)
+			{
+				UE::Tasks::Wait(TasksCopy);
+			}
+		}
+
+		static void ReleaseHandleImplementation(const int64 InHandleId)
+		{
+			if (InHandleId <= 0)
+			{
+				return;
+			}
+
+			TArray<UE::Tasks::FTask> TaskList;
+			{
+				FScopeLock ScopeLock(&HandleMutex);
+				const auto TasksPtr = HandleTasks.Find(InHandleId);
+				if (TasksPtr == nullptr)
+				{
+					return;
+				}
+				TaskList = MoveTemp(*TasksPtr);
+				HandleTasks.Remove(InHandleId);
+			}
+
+			if (TaskList.Num() > 0)
+			{
+				UE::Tasks::Wait(TaskList);
+			}
+		}
+
 		static int32 GetNumWorkerThreadsImplementation()
 		{
 			return FTaskGraphInterface::Get().GetNumWorkerThreads();
@@ -211,10 +369,18 @@ namespace
 		{
 			FClassBuilder(TEXT("FTasksQuery"), NAMESPACE_LIBRARY)
 				.Function(TEXT("ExecuteBatch"), ExecuteBatchImplementation)
+				.Function(TEXT("ScheduleBatch"), ScheduleBatchImplementation)
+				.Function(TEXT("IsHandleCompleted"), IsHandleCompletedImplementation)
+				.Function(TEXT("WaitHandle"), WaitHandleImplementation)
+				.Function(TEXT("ReleaseHandle"), ReleaseHandleImplementation)
 				.Function(TEXT("GetNumWorkerThreads"), GetNumWorkerThreadsImplementation)
 				.Function(TEXT("GetCurrentNativeThreadId"), GetCurrentNativeThreadIdImplementation);
 		}
 	};
+
+	std::atomic<int64> FTasksQuery::NextHandleId{1};
+	FCriticalSection FTasksQuery::HandleMutex;
+	TMap<int64, TArray<UE::Tasks::FTask>> FTasksQuery::HandleTasks;
 
 	[[maybe_unused]] FTasksQuery TasksQuery;
 }
