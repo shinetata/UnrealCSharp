@@ -5,6 +5,8 @@
 #include "Tasks/Task.h"
 #include "Async/TaskGraphInterfaces.h"
 #include "Misc/ScopeLock.h"
+#include "Setting/UnrealCSharpSetting.h"
+#include "Common/FUnrealCSharpFunctionLibrary.h"
 
 namespace
 {
@@ -53,6 +55,19 @@ namespace
 			uint64 CachedKey = 0;
 			void* CachedThunk = nullptr;
 		};
+
+		static bool IsDebugSingleThread()
+		{
+#if UE_BUILD_DEBUG
+			return true;
+#else
+			if (const auto Setting = FUnrealCSharpFunctionLibrary::GetMutableDefaultSafe<UUnrealCSharpSetting>())
+			{
+				return Setting->IsEnableDebug();
+			}
+			return false;
+#endif
+		}
 
 		static uint64 GetManagedLookupCacheKey()
 		{
@@ -132,15 +147,36 @@ namespace
 				return;
 			}
 
+			void* const StateHandle = const_cast<void*>(InStateHandle);
+			using FExecuteTaskThunk = void (*)(void*, int32, MonoObject**);
+			const auto Thunk = reinterpret_cast<FExecuteTaskThunk>(FoundThunk);
+
+			auto ExecuteOne = [StateHandle, Thunk](int32 TaskIndex)
+			{
+				MonoObject* Exception = nullptr;
+				Thunk(StateHandle, TaskIndex, &Exception);
+				if (Exception != nullptr)
+				{
+					FMonoDomain::Unhandled_Exception(Exception);
+				}
+			};
+
+			if (IsDebugSingleThread())
+			{
+				for (int32 TaskIndex = 0; TaskIndex < InTaskCount; ++TaskIndex)
+				{
+					ExecuteOne(TaskIndex);
+				}
+				return;
+			}
+
 			TArray<UE::Tasks::FTask> TaskList;
 			TaskList.Reserve(InTaskCount);
-
-			void* const StateHandle = const_cast<void*>(InStateHandle);
 
 			for (int32 TaskIndex = 0; TaskIndex < InTaskCount; ++TaskIndex)
 			{
 				UE::Tasks::FTask Task;
-				Task.Launch(TEXT("UETasksQuery.ExecuteBatch"), [StateHandle, TaskIndex, FoundThunk]()
+				Task.Launch(TEXT("UETasksQuery.ExecuteBatch"), [TaskIndex, ExecuteOne]()
 				{
 					FManagedJobScope ManagedScope;
 
@@ -149,16 +185,7 @@ namespace
 						return;
 					}
 
-					using FExecuteTaskThunk = void (*)(void*, int32, MonoObject**);
-					const auto Thunk = reinterpret_cast<FExecuteTaskThunk>(FoundThunk);
-
-					MonoObject* Exception = nullptr;
-					Thunk(StateHandle, TaskIndex, &Exception);
-
-					if (Exception != nullptr)
-					{
-						FMonoDomain::Unhandled_Exception(Exception);
-					}
+					ExecuteOne(TaskIndex);
 				});
 
 				TaskList.Add(MoveTemp(Task));
