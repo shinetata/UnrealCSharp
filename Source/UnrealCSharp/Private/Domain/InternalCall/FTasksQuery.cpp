@@ -124,6 +124,41 @@ namespace
 			return Cache.CachedThunk;
 		}
 
+		static bool ValidateManagedContext()
+		{
+			if (!FMonoDomain::bLoadSucceed || FMonoDomain::Domain == nullptr)
+			{
+				return false;
+			}
+
+			if (!FMonoDomain::IsManagedJobExecutionEnabled())
+			{
+				return false;
+			}
+
+			return true;
+		}
+
+		static bool GetExecuteThunk(FManagedThunkCache& Cache, void*& OutThunk)
+		{
+			OutThunk = GetManagedThunkCached(
+				Cache, TEXT("UETasksQueryRunner"), TEXT("ExecuteTask"), 2);
+			return OutThunk != nullptr;
+		}
+
+		static void ExecuteOneTask(void* StateHandle, void* Thunk, int32 TaskIndex)
+		{
+			using FExecuteTaskThunk = void (*)(void*, int32, MonoObject**);
+			const auto TypedThunk = reinterpret_cast<FExecuteTaskThunk>(Thunk);
+
+			MonoObject* Exception = nullptr;
+			TypedThunk(StateHandle, TaskIndex, &Exception);
+			if (Exception != nullptr)
+			{
+				FMonoDomain::Unhandled_Exception(Exception);
+			}
+		}
+
 		static void ExecuteBatchImplementation(const void* InStateHandle,
 		                                       const int32 InTaskCount,
 		                                       const bool bWait)
@@ -133,44 +168,24 @@ namespace
 				return;
 			}
 
-			if (!FMonoDomain::bLoadSucceed || FMonoDomain::Domain == nullptr)
-			{
-				return;
-			}
-
-			if (!FMonoDomain::IsManagedJobExecutionEnabled())
+			if (!ValidateManagedContext())
 			{
 				return;
 			}
 
 			static FManagedThunkCache ExecuteCache;
-			const auto FoundThunk = GetManagedThunkCached(
-				ExecuteCache, TEXT("UETasksQueryRunner"), TEXT("ExecuteTask"), 2);
-
-			if (FoundThunk == nullptr)
+			void* FoundThunk = nullptr;
+			if (!GetExecuteThunk(ExecuteCache, FoundThunk))
 			{
 				return;
 			}
 
 			void* const StateHandle = const_cast<void*>(InStateHandle);
-			using FExecuteTaskThunk = void (*)(void*, int32, MonoObject**);
-			const auto Thunk = reinterpret_cast<FExecuteTaskThunk>(FoundThunk);
-
-			auto ExecuteOne = [StateHandle, Thunk](int32 TaskIndex)
-			{
-				MonoObject* Exception = nullptr;
-				Thunk(StateHandle, TaskIndex, &Exception);
-				if (Exception != nullptr)
-				{
-					FMonoDomain::Unhandled_Exception(Exception);
-				}
-			};
-
 			if (IsDebugSingleThread())
 			{
 				for (int32 TaskIndex = 0; TaskIndex < InTaskCount; ++TaskIndex)
 				{
-					ExecuteOne(TaskIndex);
+					ExecuteOneTask(StateHandle, FoundThunk, TaskIndex);
 				}
 				return;
 			}
@@ -181,7 +196,7 @@ namespace
 			for (int32 TaskIndex = 0; TaskIndex < InTaskCount; ++TaskIndex)
 			{
 				UE::Tasks::FTask Task;
-				Task.Launch(TEXT("UETasksQuery.ExecuteBatch"), [TaskIndex, ExecuteOne]()
+				Task.Launch(TEXT("UETasksQuery.ExecuteBatch"), [StateHandle, FoundThunk, TaskIndex]()
 				{
 					FManagedJobScope ManagedScope;
 
@@ -190,7 +205,7 @@ namespace
 						return;
 					}
 
-					ExecuteOne(TaskIndex);
+					ExecuteOneTask(StateHandle, FoundThunk, TaskIndex);
 				});
 
 				TaskList.Add(MoveTemp(Task));
@@ -209,44 +224,24 @@ namespace
 				return 0;
 			}
 
-			if (!FMonoDomain::bLoadSucceed || FMonoDomain::Domain == nullptr)
-			{
-				return 0;
-			}
-
-			if (!FMonoDomain::IsManagedJobExecutionEnabled())
+			if (!ValidateManagedContext())
 			{
 				return 0;
 			}
 
 			static FManagedThunkCache ExecuteCache;
-			const auto FoundThunk = GetManagedThunkCached(
-				ExecuteCache, TEXT("UETasksQueryRunner"), TEXT("ExecuteTask"), 2);
-
-			if (FoundThunk == nullptr)
+			void* FoundThunk = nullptr;
+			if (!GetExecuteThunk(ExecuteCache, FoundThunk))
 			{
 				return 0;
 			}
 
 			void* const StateHandle = const_cast<void*>(InStateHandle);
-			using FExecuteTaskThunk = void (*)(void*, int32, MonoObject**);
-			const auto Thunk = reinterpret_cast<FExecuteTaskThunk>(FoundThunk);
-
-			auto ExecuteOne = [StateHandle, Thunk](int32 TaskIndex)
-			{
-				MonoObject* Exception = nullptr;
-				Thunk(StateHandle, TaskIndex, &Exception);
-				if (Exception != nullptr)
-				{
-					FMonoDomain::Unhandled_Exception(Exception);
-				}
-			};
-
 			if (IsDebugSingleThread())
 			{
 				for (int32 TaskIndex = 0; TaskIndex < InTaskCount; ++TaskIndex)
 				{
-					ExecuteOne(TaskIndex);
+					ExecuteOneTask(StateHandle, FoundThunk, TaskIndex);
 				}
 				return 0;
 			}
@@ -257,7 +252,7 @@ namespace
 			for (int32 TaskIndex = 0; TaskIndex < InTaskCount; ++TaskIndex)
 			{
 				UE::Tasks::FTask Task;
-				Task.Launch(TEXT("UETasksQuery.ScheduleBatch"), [TaskIndex, ExecuteOne]()
+				Task.Launch(TEXT("UETasksQuery.ScheduleBatch"), [StateHandle, FoundThunk, TaskIndex]()
 				{
 					FManagedJobScope ManagedScope;
 
@@ -266,7 +261,7 @@ namespace
 						return;
 					}
 
-					ExecuteOne(TaskIndex);
+					ExecuteOneTask(StateHandle, FoundThunk, TaskIndex);
 				});
 
 				TaskList.Add(MoveTemp(Task));
