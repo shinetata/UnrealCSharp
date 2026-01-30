@@ -7,6 +7,7 @@
 #include "Misc/ScopeLock.h"
 #include "Setting/UnrealCSharpSetting.h"
 #include "Common/FUnrealCSharpFunctionLibrary.h"
+#include "Containers/Array.h"
 #include <atomic>
 
 namespace
@@ -350,6 +351,69 @@ namespace
 			}
 		}
 
+		static int64 CombineHandlesImplementation(MonoArray* InHandleIds)
+		{
+			if (InHandleIds == nullptr)
+			{
+				return 0;
+			}
+
+			const int32 HandleCount = static_cast<int32>(FMonoDomain::Array_Length(InHandleIds));
+			if (HandleCount <= 0)
+			{
+				return 0;
+			}
+
+			TArray<TArray<UE::Tasks::FTask>> StagedLists;
+			{
+				FScopeLock ScopeLock(&HandleMutex);
+				StagedLists.Reserve(HandleCount);
+				for (int32 Index = 0; Index < HandleCount; ++Index)
+				{
+					const int64 HandleId = FMonoDomain::Array_Addr<int64>(InHandleIds, Index);
+					if (HandleId <= 0)
+					{
+						continue;
+					}
+
+					if (auto TasksPtr = HandleTasks.Find(HandleId))
+					{
+						StagedLists.Add(MoveTemp(*TasksPtr));
+						HandleTasks.Remove(HandleId);
+					}
+				}
+			}
+
+			int32 TotalTasks = 0;
+			for (const auto& TaskList : StagedLists)
+			{
+				TotalTasks += TaskList.Num();
+			}
+
+			if (TotalTasks <= 0)
+			{
+				return 0;
+			}
+
+			TArray<UE::Tasks::FTask> CombinedTasks;
+			CombinedTasks.Reserve(TotalTasks);
+			for (auto& TaskList : StagedLists)
+			{
+				for (auto& Task : TaskList)
+				{
+					CombinedTasks.Add(MoveTemp(Task));
+				}
+			}
+
+			const int64 NewHandleId = NextHandleId.fetch_add(1);
+			{
+				FScopeLock ScopeLock(&HandleMutex);
+				HandleTasks.Add(NewHandleId, MoveTemp(CombinedTasks));
+			}
+
+			return NewHandleId;
+		}
+
 		static int32 GetNumWorkerThreadsImplementation()
 		{
 			return FTaskGraphInterface::Get().GetNumWorkerThreads();
@@ -368,6 +432,7 @@ namespace
 				.Function(TEXT("IsHandleCompleted"), IsHandleCompletedImplementation)
 				.Function(TEXT("WaitHandle"), WaitHandleImplementation)
 				.Function(TEXT("ReleaseHandle"), ReleaseHandleImplementation)
+				.Function(TEXT("CombineHandles"), CombineHandlesImplementation)
 				.Function(TEXT("GetNumWorkerThreads"), GetNumWorkerThreadsImplementation)
 				.Function(TEXT("GetCurrentNativeThreadId"), GetCurrentNativeThreadIdImplementation);
 		}
