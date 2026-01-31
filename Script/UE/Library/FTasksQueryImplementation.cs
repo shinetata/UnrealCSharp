@@ -22,9 +22,6 @@ public static unsafe class FTasksQueryImplementation
     public static extern void FTasksQuery_ReleaseHandleImplementation(long handleId);
 
     [MethodImpl(MethodImplOptions.InternalCall)]
-    public static extern long FTasksQuery_CombineHandlesImplementation(long[] handleIds);
-
-    [MethodImpl(MethodImplOptions.InternalCall)]
     public static extern int FTasksQuery_GetNumWorkerThreadsImplementation();
     
     [MethodImpl(MethodImplOptions.InternalCall)]

@@ -1,80 +1,28 @@
 using System;
-using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 namespace Script.Library;
 
 public sealed class UETasksJobHandle : IDisposable
 {
-    public static readonly UETasksJobHandle Completed = new(0, default, null, true);
+    public static readonly UETasksJobHandle Completed = new(0, default, true);
 
     private long handleId;
     private GCHandle handle;
-    private GCHandle[] extraHandles;
     private bool released;
 
     public long HandleId => handleId;
 
     public UETasksJobHandle(long handleId, GCHandle handle)
-        : this(handleId, handle, null, false)
+        : this(handleId, handle, false)
     {
     }
 
-    private UETasksJobHandle(long handleId, GCHandle handle, GCHandle[] extraHandles, bool released)
+    private UETasksJobHandle(long handleId, GCHandle handle, bool released)
     {
         this.handleId = handleId;
         this.handle = handle;
-        this.extraHandles = extraHandles;
         this.released = released;
-    }
-
-    public static UETasksJobHandle CreateCombined(long handleId, GCHandle[] extraHandles)
-    {
-        if (handleId == 0)
-        {
-            if (extraHandles != null)
-            {
-                for (int i = 0; i < extraHandles.Length; i++)
-                {
-                    if (extraHandles[i].IsAllocated)
-                    {
-                        extraHandles[i].Free();
-                    }
-                }
-            }
-            return Completed;
-        }
-
-        return new UETasksJobHandle(handleId, default, extraHandles, false);
-    }
-
-    public void DetachForCombine(List<GCHandle> target)
-    {
-        if (released)
-        {
-            return;
-        }
-
-        released = true;
-        handleId = 0;
-
-        if (handle.IsAllocated)
-        {
-            target.Add(handle);
-            handle = default;
-        }
-
-        if (extraHandles != null)
-        {
-            for (int i = 0; i < extraHandles.Length; i++)
-            {
-                if (extraHandles[i].IsAllocated)
-                {
-                    target.Add(extraHandles[i]);
-                }
-            }
-            extraHandles = null;
-        }
     }
 
     public bool IsCompleted
@@ -118,18 +66,6 @@ public sealed class UETasksJobHandle : IDisposable
         if (handle.IsAllocated)
         {
             handle.Free();
-        }
-
-        if (extraHandles != null)
-        {
-            for (int i = 0; i < extraHandles.Length; i++)
-            {
-                if (extraHandles[i].IsAllocated)
-                {
-                    extraHandles[i].Free();
-                }
-            }
-            extraHandles = null;
         }
     }
 }
